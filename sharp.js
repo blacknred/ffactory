@@ -78,6 +78,7 @@ function sharp(input, opts) {
             });
         }
 
+        // merge
         if (opts.merge) {
             operation.composite([{
                 input: opts.merge,

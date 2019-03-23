@@ -1,14 +1,21 @@
 const fs = require('fs');
 const os = require('os');
+const Path = require('path');
 const crypto = require('crypto');
 const isColor = require('is-color');
 const child = require('child_process');
 const Ffmpeg = require('fluent-ffmpeg');
 
+const config = require('../../config');
+
 const EXT = {
-    video: ['mp4', 'flv', 'ogg', 'webm', 'avi', 'mov', 'hls', '3gp'],
-    audio: ['mp3', 'aac', 'ac3'],
-    image: ['gif', 'png', 'jpg'],
+    video: ['mp4', 'flv', 'ogg', 'webm', 'avi', 'mov',
+    'hls', '3gp', 'mpg', 'mpeg', 'mkv', 'matroska'],
+    audio: ['mp3', 'aac', 'ac3', 'm4a'],
+    image: ['gif', 'png', 'jpg', 'jpeg'],
+    get all() {
+        return this.video.concat(this.audio, this.image);
+    }
 };
 const CODECS = {
     mp4: {
@@ -43,9 +50,17 @@ const CODECS = {
         video: 'copy',
         audio: 'copy',
     },
+    mpeg: {
+        video: 'mpeg2video',
+        audio: 'mp2',
+    },
+    matroska: {
+        video: 'copy',
+        audio: 'copy',
+    }
 };
 const CROP_POSITION_MAP = {
-    center: '',
+    center: '30:30',
     top: 'top',
     left: 'left',
     bottom: 'bottom',
@@ -68,11 +83,26 @@ const padColorValidate = (color) => {
     }
     return 'white';
 };
-const getSizes = (w, h, ar) => {
-
+const validateFormat = (f) => {
+    if (!EXT.all.includes(f)) {
+        return null;
+    }
+    switch (f) {
+        case 'mpg': return 'mpeg';
+        case 'mkv': return 'matroska';
+        case 'aac':
+        case 'ac3':
+        case 'm4a': return 'adts';
+        case 'jpg':
+        case 'jpeg':
+        case 'png': return 'image2pipe';
+        default: return f;
+    }
 };
 
 function ffmpeg(input, opts, progressCb) {
+    const format = validateFormat(opts.format);
+
     const operation = Ffmpeg(input);
 
     // Command takes too long, raise its priority
@@ -80,132 +110,155 @@ function ffmpeg(input, opts, progressCb) {
     // Kill ffmpeg anyway
     setTimeout(() => operation.kill(), END_TIMESPAN);
 
-    operation
-        // show command
-        .on('start', console.log)
-        .on('end', console.log)
-        .on('error', console.log)
-        .on('filenames', console.log)
-        // handle progress
-        .on('progress', progressCb || onProgress);
-        // metadata
-        // .ffprobe((err, metadata) => console.log('metadata'));
+    // cpu
+    operation.inputOption('-threads', os.cpus().length);
 
-    if (opts.trim) {
-        operation.seekInput(opts.trim);
-        // operation.seekOutput(opts.trim.stop);
+    // events
+    if (!config.is_dev) {
+        operation
+            .on('progress', progressCb || onProgress) // handle progress
+            .on('filenames', console.log) // show result
+            .on('end', console.log);
     }
-
-    if (opts.duration) {
-        operation.duration(opts.duration);
-    }
-
+    operation.on('start', console.log) // show command
+    .on('error', console.log);
     if (opts.onFly) {
         /*
         you may not use mp4 when outputting to a stream, as mp4 requires
         a seekable output (it needs to go back after having written the
         video file to write the file header).
-        frag_keyframe allows fragmented output &
-        empty_moov will cause output to be 100% fragmented;
-        without this the first fragment will be muxed as a short movie
+        frag_keyframe allows fragmented output.
+        empty_moov will cause output to be 100% fragmented - without
+        this the first fragment will be muxed as a short movie
         (using moov) followed by the rest of the media in fragments.
         */
-        operation.inputOptions(['-re', '-threads', os.cpus().length]);
-        operation.outputOptions([
-            // '-movflags', 'frag_keyframe+faststart',
-            '-movflags', 'frag_keyframe+empty_moov',
-            '-frag_size', '1048576',
-        ]);
+        // operation.inputOption('-re');
+        // operation.outputOption('-movflags', 'frag_keyframe+empty_moov');
+        // '-movflags', 'frag_keyframe+faststart',
+        // '-frag_size', '1048576',
     }
 
     // transformation
-    if (opts.width || opts.height) {
-        operation.size(`${opts.width || '?'}x${opts.height || '?'}`);
-    }
+    // if (opts.start) {
+    //     operation.seekInput(opts.start);
+    //     // operation.seekOutput(opts.trim.stop);
+    // }
+    // if (opts.length) {
+    //     operation.duration(opts.length);
+    // }
+    // if (opts.fit_opt === 'blur') {
+    //     if ((opts.format || opts.ext) === 'mp4') {
+    //         operation.videoFilter([
+    //             `[0:v]scale=iw:ih,boxblur=luma_radius=min(h\\,w)/20:luma_power=1:chroma_radius=min(cw\\,ch)/20:chroma_power=1[bg];
+    //             [0:v]scale=720:720:force_original_aspect_ratio=decrease[fg];
+    //             [bg][fg]overlay=(W-w)/2:(H-h)/2[outv]`
+    //         ]);
+    //         operation.outputOptions([
+    //             '-map [outv]',
+    //             '-map 0:a?',
+    //         ]);
+    //     } else {
+    //         operation.videoFilter(
+    //             `split [original][copy];
+    //             [copy] crop=ih*9/16:ih:iw/2-ow/2:0, scale=ih:-1, gblur=sigma=20[blurred];
+    //             [blurred][original]overlay=(main_w-overlay_w)/2:(main_h-overlay_h)/2`
+    //         );
+    //     }
+    // }
 
-    if (opts.aspectRatio) {
-        operation.aspect(opts.aspectRatio);
-    }
+    if (opts.width || opts.height || opts.aspectRatio || opts.fit) {
+        const vfOpts = [];
 
-    if (opts.fit) {
         if (opts.fit === 'pad') {
             if (opts.fit_opt === 'blur') {
-                if ((opts.format || opts.ext) === 'mp4') {
-                    operation.videoFilter([
-                        `[0:v]scale=iw:ih,boxblur=luma_radius=min(h\\,w)/20:luma_power=1:chroma_radius=min(cw\\,ch)/20:chroma_power=1[bg];
-                        [0:v]scale=720:720:force_original_aspect_ratio=decrease[fg];
-                        [bg][fg]overlay=(W-w)/2:(H-h)/2[outv]`
-                    ]);
-                    operation.outputOptions([
-                        '-map [outv]',
-                        '-map 0:a?',
-                    ]);
-                } else {
-                    operation.videoFilter(
-                        `split [original][copy];
-                        [copy] crop=ih*9/16:ih:iw/2-ow/2:0, scale=ih:-1, gblur=sigma=20[blurred];
-                        [blurred][original]overlay=(main_w-overlay_w)/2:(main_h-overlay_h)/2`
-                    );
-                }
+                vfOpts.push(
+                    `split [original][copy];
+                [copy] crop=ih*9/16:ih:iw/2-ow/2:0, scale=ih:-1, gblur=sigma=20[blurred];
+                [blurred][original]overlay=(main_w-overlay_w)/2:(main_h-overlay_h)/2`
+                );
             } else {
-                operation.autopad(padColorValidate(opts.fit_opt));
+                vfOpts.push(`pad=${opts.width || 'iw'}:${opts.height || 'ih'}:(ow-iw)/2:(oh-ih)/2:white`);
+                // operation.autopad(padColorValidate(opts.fit_opt));
             }
-        } else if (opts.fit === 'crop') {
-            operation.videoFilter([
-                `crop='min(iw,1*ih)':'min(iw/1,ih)':${CROP_POSITION_MAP[opts.fit_opt || 'center']}`,
-                // {
-                //     filter: 'scale',
-                //     options: 'iw:ih', // `crop=240:120:240:120`
-                // },
-            ]);
         }
+
+        if (opts.fit_opt === 'crop') {
+            vfOpts.push(`crop=iw:ih:${CROP_POSITION_MAP[opts.fit_position || 'center']}`);
+            // min(iw,1*ih)':'min(iw/1,ih)'
+        }
+
+        if (opts.width || opts.height) {
+            vfOpts.push(`scale=${opts.width || 'iw'}:${opts.height || 'ih'}`);
+        }
+
+        if (opts.aspectRatio) {
+            vfOpts.push(`setdar=dar=${opts.aspectRatio}`);
+        }
+
+        operation.videoFilters(vfOpts);
     }
-
-    
-
+    // merge
     // if (opts.merge) {
     //     operation.addInput(opts.logo.src);
     //     operation.complexFilter(`"overlay=(main_w-overlay_w)/2:(main_h-overlay_h)/2"`);
     // }
-//     ffmpeg()
-//    .input(videofile.mp4)
-//     .input(watermark.png)
-//     .videoCodec('libx264')
-//     .outputOptions('-pix_fmt yuv420p')
-//     .complexFilter([
-//         "[0:v]scale=640:-1[bg];[bg][1:v]overlay=W-w-10:H-h-10"
-//     ])
+    //     ffmpeg()
+    //    .input(videofile.mp4)
+    //     .input(watermark.png)
+    //     .videoCodec('libx264')
+    //     .outputOptions('-pix_fmt yuv420p')
+    //     .complexFilter([
+    //         "[0:v]scale=640:-1[bg];[bg][1:v]overlay=W-w-10:H-h-10"
+    //     ])
 
 
-    // if (EXT.image.includes(opts.format)) {
-    //     if (opts.format === 'gif') {
-    //         // extract a palette
-    //         const palette = Path.join(os.tmpdir(), crypto.randomBytes(20).toString('hex'));
-    //         operation.addOutputOptions('-vf "fps=10,scale=320:-2:flags=lanczos,palettegen"');
-    //         operation.saveToFile(palette);
-    //         // use palette for converting
-    //         operation.addInput(palette);
-    //         operation.complexFilter(`"fps=10,scale=320:-2:lanczos[video];[video][1:v]paletteuse"`);
-    //     }
-    //     /*
-    //     // gif
-    //     .format('gif')
-    //     .size('640x360')
-    //     .duration('0:15')
-    //     .inputFPS(8)
 
-    //     // jpg
-    //     .loop(5)
-    //     .fps(25)
-    //     .save('/path/to/your_target.m4v');
-    //     */
-    // }
+    // transcoding
 
-    // operation.preset('superfast'); // flashvideo
-    operation.outputFormat(opts.format || opts.ext);
-    operation.videoCodec(CODECS[opts.format].video || 'copy');
-    operation.audioCodec(CODECS[opts.format].audio || 'copy');
+    // video -> jpg, jpg -> video
+    // video -> gif, gif -> video
+    if (EXT.image.includes(opts.format)) {
+        if (opts.format === 'gif') {
+            // extract a palette
+            const palette = Path.join(os.tmpdir(), crypto.randomBytes(20).toString('hex'));
+            operation.addOutputOptions('-vf "fps=10,scale=320:-2:flags=lanczos,palettegen"');
+            operation.saveToFile(palette);
+            // use palette for converting
+            operation.addInput(palette);
+            operation.complexFilter(`"fps=10,scale=320:-2:lanczos[video];[video][1:v]paletteuse"`);
+        } else {
+            if (opts.format === 'png') {
+                operation.addOutputOptions(['-vframes', '1', '-c:v', 'png']);
+            } else {
+                operation.addOutputOptions(['-vframes', '1', '-q:v', '2']);
+            }
+        }
+        /*
+        // gif
+        .format('gif')
+        .size('640x360')
+        .duration('0:15')
+        .inputFPS(8)
 
+        // jpg
+        .loop(5)
+        .fps(25)
+        .save('/path/to/your_target.m4v');
+        */
+    }
+    // video -> audio, ?audio -> audio
+    if (EXT.audio.includes(opts.format)) {
+        operation.outputOptions(['-vn', '-q:a', '0', '-map', 'a']);
+    }
+    // video -> video
+    if (EXT.video.includes(opts.format)) {
+        operation.videoCodec(CODECS[format].video || 'copy');
+        operation.audioCodec(CODECS[format].audio || 'copy');
+        // operation.addOutputOptions(['-level', '3.0', '-pix_fmt', 'yuv420p']); // -profile:v baseline
+    }
+
+
+    operation.outputOption('-f', format || opts.ext);
     // .save('your rtmp url') /tmp
     return operation;
 }
@@ -238,5 +291,5 @@ function ffmpegRaw(input, opts) {
 module.exports = {
     ffmpeg,
     ffmpegRaw,
-    EXT: [...EXT.video, ...EXT.audio, ...EXT.image],
+    EXT: EXT.all,
 };

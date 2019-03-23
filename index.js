@@ -1,6 +1,7 @@
 /* eslint-disable no-param-reassign */
 const Url = require('url');
 const Path = require('path');
+const isColor = require('is-color');
 const TextToSVG = require('text-to-svg');
 const request = require('request-promise');
 
@@ -28,20 +29,20 @@ async function processor(path, rawOpts = {}, ext, onFly = false, progressCb) {
 
         width: parseInt(rawOpts.w || rawOpts.width, 10) || null,
         height: parseInt(rawOpts.h || rawOpts.height, 10) || null,
-        aspectRatio: rawOpts.ar || null,
+        aspectRatio: parseInt(rawOpts.ar || rawOpts.aspect, 10) || null,
 
-        trim: parseInt(rawOpts.t || rawOpts.trim, 10) || null,
-        duration: parseInt(rawOpts.d || rawOpts.duration, 10) || null,
+        start: parseInt(rawOpts.s || rawOpts.start, 10) || null,
+        length: parseInt(rawOpts.l || rawOpts.length, 10) || null,
 
         quality: parseInt(rawOpts.q || rawOpts.quality, 10) || null,
-        metadata: (rawOpts.m || rawOpts.metadata) === true,
+        metadata: (rawOpts.md || rawOpts.metadata) === true,
         improve: (rawOpts.i || rawOpts.improve) === true,
 
         preset: rawOpts.p || rawOpts.preset,
     };
 
-    if (rawOpts.c) {
-        const crop = rawOpts.c || rawOpts.crop;
+    if (rawOpts.a) {
+        const crop = rawOpts.a || rawOpts.adapt;
         const parts = crop.split(SPLITTER);
 
         opts.fit = parts[0] || crop;
@@ -67,6 +68,9 @@ async function processor(path, rawOpts = {}, ext, onFly = false, progressCb) {
             buffer = Buffer.from(SVG.getSVG(parts[0] || merge, {
                 fontSize: parseInt(parts[2], 10) || 33,
                 anchor: 'top',
+                attributes: {
+                    fill: isColor(parts[3]) ? parts[3] : 'black',
+                },
             }));
         } finally {
             if (parts[1]) {
